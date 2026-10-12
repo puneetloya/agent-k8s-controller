@@ -31,6 +31,7 @@ type Config struct {
 	AgentLogLevel          string
 	Labels                 []string
 	MaxParallelJobs        int
+	MaxPendingJobs         int
 	SemaphoreEndpoint      string
 	KeepFailedJobsFor      time.Duration
 	KeepSuccessfulJobsFor  time.Duration
@@ -79,6 +80,7 @@ func NewConfigFromEnv(endpoint string) (*Config, error) {
 		AgentImage:             agentImage,
 		AgentStartupParameters: agentStartupParameters,
 		MaxParallelJobs:        maxParallelJobs,
+		MaxPendingJobs:         maxPendingJobs(maxParallelJobs),
 		Labels:                 labels,
 		AgentLogLevel:          agentLogLevel(),
 		KeepFailedJobsFor:      keepFailedJobsFor(),
@@ -104,6 +106,26 @@ func parseLabels() ([]string, error) {
 	}
 
 	return labels, nil
+}
+
+// 0, the default, disables the check. Invalid values disable it too.
+func maxPendingJobs(maxParallelJobs int) int {
+	fromEnv := os.Getenv("MAX_PENDING_JOBS")
+	if fromEnv == "" {
+		return 0
+	}
+
+	v, err := strconv.Atoi(fromEnv)
+	if err != nil || v < 0 {
+		klog.Warningf("Invalid MAX_PENDING_JOBS (%s) - pending jobs check disabled", fromEnv)
+		return 0
+	}
+
+	if v >= maxParallelJobs {
+		klog.Warningf("MAX_PENDING_JOBS (%d) >= MAX_PARALLEL_JOBS (%d) - it will have no effect", v, maxParallelJobs)
+	}
+
+	return v
 }
 
 func keepFailedJobsFor() time.Duration {
