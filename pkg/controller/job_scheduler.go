@@ -228,6 +228,11 @@ func (s *JobScheduler) buildAgentStartupParameters(agentType *agenttypes.AgentTy
 		fmt.Sprintf("%s=%s", config.AgentTypeLabel, agentType.AgentTypeName),
 	}
 
+	// Lets the pending jobs check find this job's pod. Off by default.
+	if s.config.MaxPendingJobs > 0 {
+		labels = append(labels, fmt.Sprintf("%s=%s", config.JobIDLabel, jobID))
+	}
+
 	if len(s.config.Labels) > 0 {
 		labels = append(labels, s.config.Labels...)
 	}
@@ -514,6 +519,28 @@ func (s *JobScheduler) OnDelete(obj interface{}) {
 
 	s.untrack(jobID)
 	klog.InfoS("Job deleted", "job", jobID, "type", agentType)
+}
+
+// Pending counts tracked jobs that are not running yet: the agent pod is not ready,
+// or its job pod has no node yet. Each job counts once, so this never exceeds len(current).
+func (s *JobScheduler) Pending(unscheduled []string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ids := map[string]struct{}{}
+	for id, state := range s.current {
+		if !state.Running {
+			ids[id] = struct{}{}
+		}
+	}
+
+	for _, id := range unscheduled {
+		if _, tracked := s.current[id]; tracked {
+			ids[id] = struct{}{}
+		}
+	}
+
+	return len(ids)
 }
 
 func (s *JobScheduler) IsCurrentJob(jobID string) bool {

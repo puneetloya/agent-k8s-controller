@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/klog/v2"
 
@@ -21,6 +22,11 @@ type Controller struct {
 	agentTypeRegistry *agenttypes.Registry
 	clientset         kubernetes.Interface
 	jobScheduler      *JobScheduler
+	config            *config.Config
+
+	// Both nil unless MAX_PENDING_JOBS is set.
+	pendingTracker *PendingTracker
+	podInformers   informers.SharedInformerFactory
 }
 
 func New(
@@ -48,17 +54,59 @@ func New(
 		return nil, err
 	}
 
-	return &Controller{
+	c := &Controller{
 		semaphoreClient:   semaphoreClient,
 		clientset:         clientset,
 		agentTypeRegistry: agentTypeRegistry,
 		jobScheduler:      jobScheduler,
-	}, nil
+		config:            config,
+	}
+
+	if config.MaxPendingJobs > 0 {
+		if err := c.setupPendingTracker(); err != nil {
+			return nil, err
+		}
+	}
+
+	return c, nil
+}
+
+// Job pods lack the resource type label the shared informer factory filters on,
+// so they get their own factory, scoped to job pods only.
+func (c *Controller) setupPendingTracker() error {
+	selector, err := JobPodSelector()
+	if err != nil {
+		return err
+	}
+
+	factory := informers.NewSharedInformerFactoryWithOptions(
+		c.clientset,
+		time.Minute,
+		informers.WithNamespace(c.config.Namespace),
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.LabelSelector = selector
+		}),
+	)
+
+	tracker := NewPendingTracker()
+	if err := tracker.RegisterInformer(factory); err != nil {
+		return err
+	}
+
+	c.pendingTracker = tracker
+	c.podInformers = factory
+	klog.InfoS("Pending jobs check enabled", "maxPendingJobs", c.config.MaxPendingJobs)
+	return nil
 }
 
 func (c *Controller) Run(ctx context.Context) error {
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting controller")
+
+	// Not waiting for the cache to sync: until it does, no pod counts as unscheduled.
+	if c.podInformers != nil {
+		c.podInformers.Start(ctx.Done())
+	}
 
 	go wait.UntilWithContext(ctx, c.runWorker, time.Second)
 
@@ -86,6 +134,11 @@ func (c *Controller) tick(ctx context.Context) bool {
 		return true
 	}
 
+	budget, ok := c.pendingBudget()
+	if !ok {
+		return true
+	}
+
 	klog.InfoS("Polling Semaphore API", "types", agentTypeNames(agentTypes))
 	jobs, err := c.semaphoreClient.ListJobs(agentTypes)
 	if err != nil {
@@ -94,11 +147,44 @@ func (c *Controller) tick(ctx context.Context) bool {
 	}
 
 	klog.Infof("Found %d jobs in the queue", len(jobs))
+	c.createJobs(ctx, jobs, budget)
+	return true
+}
 
+// noBudget means the pending jobs check is off: only MAX_PARALLEL_JOBS applies.
+const noBudget = -1
+
+// Returns how many jobs this tick may create, and false if it should not poll at all.
+func (c *Controller) pendingBudget() (int, bool) {
+	if c.pendingTracker == nil {
+		return noBudget, true
+	}
+
+	limit := c.config.MaxPendingJobs
+	pending := c.jobScheduler.Pending(c.pendingTracker.JobIDs())
+	if pending >= limit {
+		klog.InfoS("Not polling Semaphore API - too many pending jobs", "pending", pending, "max", limit)
+		return 0, false
+	}
+
+	return limit - pending, true
+}
+
+func (c *Controller) createJobs(ctx context.Context, jobs []semaphore.JobRequest, budget int) {
 	for _, j := range jobs {
+		if budget == 0 {
+			klog.Info("Reached limit of pending jobs")
+			break
+		}
+
 		agentType := c.agentTypeRegistry.Get(j.MachineType)
 		if agentType == nil {
 			klog.Warningf("agent type '%s' not registered", j.MachineType)
+			continue
+		}
+
+		// Create() is a no-op for a tracked job; skip it so it does not spend budget.
+		if budget != noBudget && c.jobScheduler.IsCurrentJob(j.JobID) {
 			continue
 		}
 
@@ -107,9 +193,11 @@ func (c *Controller) tick(ctx context.Context) bool {
 			klog.Info("Reached limit of parallel jobs")
 			break
 		}
-	}
 
-	return true
+		if err == nil && budget != noBudget {
+			budget--
+		}
+	}
 }
 
 func agentTypeNames(agentTypes []*agenttypes.AgentType) []string {
