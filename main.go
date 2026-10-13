@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -122,6 +123,8 @@ func newClientsetFromConfig() (kubernetes.Interface, error) {
 		return nil, fmt.Errorf("error getting Kubernetes config: %v", err)
 	}
 
+	applyRateLimits(kubeConfig)
+
 	clientset, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
 		return nil, fmt.Errorf("error creating kubernetes clientset from config file: %v", err)
@@ -136,10 +139,26 @@ func newInClusterClientset() (kubernetes.Interface, error) {
 		return nil, err
 	}
 
+	applyRateLimits(k8sConfig)
+
 	clientset, err := kubernetes.NewForConfig(k8sConfig)
 	if err != nil {
 		return nil, err
 	}
 
 	return clientset, nil
+}
+
+// Client-side rate limits for Kubernetes API calls. Unset or invalid values keep
+// client-go's defaults (5 QPS, burst 10).
+func applyRateLimits(c *rest.Config) {
+	if v, err := strconv.ParseFloat(os.Getenv("KUBE_API_QPS"), 32); err == nil && v > 0 {
+		c.QPS = float32(v)
+	}
+
+	if v, err := strconv.Atoi(os.Getenv("KUBE_API_BURST")); err == nil && v > 0 {
+		c.Burst = v
+	}
+
+	klog.InfoS("Kubernetes client rate limits", "qps", c.QPS, "burst", c.Burst)
 }
