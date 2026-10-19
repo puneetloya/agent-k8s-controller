@@ -21,6 +21,7 @@ A Kubernetes controller that runs Semaphore jobs in Kubernetes.
 | MAX_PENDING_JOBS                       | The max number of jobs waiting to start: agent pod not ready yet, or job pod not scheduled to a node yet. When reached, the controller stops polling for new jobs, so they stay queued. Requires `watch` on pods. By default, 0, which disables the check. Values at or above `MAX_PARALLEL_JOBS` have no effect. |
 | KUBE_API_QPS                           | Client-side rate limit (requests per second) for the controller's Kubernetes API calls. By default, unset, which keeps the client-go default of 5. |
 | KUBE_API_BURST                         | Client-side burst for the controller's Kubernetes API calls. By default, unset, which keeps the client-go default of 10. |
+| METRICS_ADDR                           | Address to serve Prometheus metrics on at `/metrics`, e.g. `:9090`. See [Metrics](#metrics). By default, unset, which serves no metrics. |
 | KUBERNETES_SERVICE_ACCOUNT             | The Kubernetes service account to attach to the pods created for the [Semaphore agent](https://github.com/semaphoreci/agent). |
 | SEMAPHORE_AGENT_LABELS                 | A comma-separated list of Kubernetes labels to apply on all resources created by the controller. |
 | SEMAPHORE_AGENT_STARTUP_PARAMETERS     | Any additional [Semaphore agent configuration parameters](https://docs.semaphoreci.com/ci-cd-environment/configure-self-hosted-agent/) to pass to the agents being created. |
@@ -28,6 +29,23 @@ A Kubernetes controller that runs Semaphore jobs in Kubernetes.
 | KEEP_FAILED_JOBS_FOR                   | A [duration string](https://pkg.go.dev/time#ParseDuration) indicating how long to keep failed Kubernetes jobs. For example, `5m`. Default is 0. |
 | KEEP_SUCCESSFUL_JOBS_FOR               | A [duration string](https://pkg.go.dev/time#ParseDuration) indicating how long to successful failed Kubernetes jobs. For example, `5m`. Default is 0. |
 | JOB_START_TIMEOUT                      | A [duration string](https://pkg.go.dev/time#ParseDuration) indicating how long to wait for a Kubernetes job created to start; after the timeout has passed, the Kubernetes job is deleted. Default is `5m`. |
+
+### Metrics
+
+When `METRICS_ADDR` is set, the controller serves these metrics, along with the standard Go and process metrics:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `semaphore_controller_jobs{state}` | gauge | Jobs by state: `awaiting_creation` (in the last polled queue, no Kubernetes job yet), `starting` (agent not ready), `running` (agent ready), `awaiting_cleanup` (finished Kubernetes jobs that still exist). `awaiting_creation` only changes when the queue is polled. |
+| `semaphore_controller_pending_jobs` | gauge | Jobs counted against `MAX_PENDING_JOBS`. Only reported when it is set. |
+| `semaphore_controller_max_parallel_jobs` | gauge | The configured `MAX_PARALLEL_JOBS`. |
+| `semaphore_controller_max_pending_jobs` | gauge | The configured `MAX_PENDING_JOBS`. Only reported when it is set. |
+| `semaphore_controller_jobs_processed_total{action}` | counter | Kubernetes jobs `created` or `deleted` by the controller. |
+| `semaphore_controller_job_start_timeouts_total` | counter | Kubernetes jobs deleted because they did not start within `JOB_START_TIMEOUT`. Also counted as `deleted`. |
+| `semaphore_controller_job_errors_total{action}` | counter | Failed Kubernetes API requests to `create` or `delete` jobs. |
+| `semaphore_controller_polls_total{result}` | counter | Controller ticks: `ok`, `error`, or skipped because of `skipped_no_space`, `skipped_pending_cap` or `skipped_no_agent_types`. |
+| `semaphore_controller_poll_errors_total{agent_type}` | counter | Failed requests for an agent type's job queue. |
+| `semaphore_controller_last_successful_poll_timestamp_seconds` | gauge | Unix time of the last poll in which at least one agent type's queue was read. |
 
 ### Scheduling agent pods
 

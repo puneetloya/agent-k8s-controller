@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/renderedtext/agent-k8s-stack/pkg/agenttypes"
+	"github.com/renderedtext/agent-k8s-stack/pkg/metrics"
 	"k8s.io/klog/v2"
 )
 
@@ -36,13 +38,17 @@ type JobRequest struct {
 
 func (a *Client) ListJobs(agentTypes []*agenttypes.AgentType) ([]JobRequest, error) {
 	jobRequests := []JobRequest{}
+	succeeded := 0
 
 	for _, agentType := range agentTypes {
 		jobs, err := a.listJobsForAgentType(agentType)
 		if err != nil {
 			klog.ErrorS(err, "error listing jobs for agent type", "agentType", agentType.AgentTypeName)
+			metrics.PollErrors.WithLabelValues(agentType.AgentTypeName).Inc()
 			continue
 		}
+
+		succeeded++
 
 		for _, j := range jobs {
 			jobRequest := JobRequest{
@@ -51,6 +57,10 @@ func (a *Client) ListJobs(agentTypes []*agenttypes.AgentType) ([]JobRequest, err
 			}
 			jobRequests = append(jobRequests, jobRequest)
 		}
+	}
+
+	if succeeded > 0 {
+		metrics.LastSuccessfulPoll.Set(float64(time.Now().Unix()))
 	}
 
 	return jobRequests, nil

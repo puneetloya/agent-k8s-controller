@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/renderedtext/agent-k8s-stack/pkg/agenttypes"
 	"github.com/renderedtext/agent-k8s-stack/pkg/config"
+	"github.com/renderedtext/agent-k8s-stack/pkg/metrics"
 	"github.com/renderedtext/agent-k8s-stack/pkg/semaphore"
 	"k8s.io/client-go/kubernetes"
 )
@@ -27,6 +29,9 @@ type Controller struct {
 	// Both nil unless MAX_PENDING_JOBS is set.
 	pendingTracker *PendingTracker
 	podInformers   informers.SharedInformerFactory
+
+	// Jobs from the last poll left without a Kubernetes job, for metrics.
+	awaitingCreation atomic.Int64
 }
 
 func New(
@@ -126,16 +131,19 @@ func (c *Controller) tick(ctx context.Context) bool {
 	agentTypes := c.agentTypeRegistry.All()
 	if len(agentTypes) == 0 {
 		klog.Info("Not polling Semaphore API - no agent types found")
+		metrics.Polls.WithLabelValues(metrics.PollSkippedNoAgentTypes).Inc()
 		return true
 	}
 
 	if !c.jobScheduler.HasSpace() {
 		klog.Info("Not polling Semaphore API - no space")
+		metrics.Polls.WithLabelValues(metrics.PollSkippedNoSpace).Inc()
 		return true
 	}
 
 	budget, ok := c.pendingBudget()
 	if !ok {
+		metrics.Polls.WithLabelValues(metrics.PollSkippedPendingCap).Inc()
 		return true
 	}
 
@@ -143,12 +151,26 @@ func (c *Controller) tick(ctx context.Context) bool {
 	jobs, err := c.semaphoreClient.ListJobs(agentTypes)
 	if err != nil {
 		klog.Error(err, "error polling job queue")
+		metrics.Polls.WithLabelValues(metrics.PollError).Inc()
 		return true
 	}
 
+	metrics.Polls.WithLabelValues(metrics.PollOK).Inc()
 	klog.Infof("Found %d jobs in the queue", len(jobs))
 	c.createJobs(ctx, jobs, budget)
+	c.awaitingCreation.Store(int64(c.countAwaitingCreation(jobs)))
 	return true
+}
+
+func (c *Controller) countAwaitingCreation(jobs []semaphore.JobRequest) int {
+	n := 0
+	for _, j := range jobs {
+		if !c.jobScheduler.IsCurrentJob(j.JobID) {
+			n++
+		}
+	}
+
+	return n
 }
 
 // noBudget means the pending jobs check is off: only MAX_PARALLEL_JOBS applies.

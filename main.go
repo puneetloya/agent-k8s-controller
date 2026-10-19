@@ -14,6 +14,7 @@ import (
 
 	"github.com/renderedtext/agent-k8s-stack/pkg/config"
 	"github.com/renderedtext/agent-k8s-stack/pkg/controller"
+	"github.com/renderedtext/agent-k8s-stack/pkg/metrics"
 	"github.com/renderedtext/agent-k8s-stack/pkg/semaphore"
 	"github.com/renderedtext/agent-k8s-stack/pkg/signals"
 	"k8s.io/apimachinery/pkg/labels"
@@ -66,6 +67,17 @@ func main() {
 	if err != nil {
 		klog.Errorf("error creating controller: %v", err)
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+	}
+
+	if addr := os.Getenv("METRICS_ADDR"); addr != "" {
+		listener, err := metrics.Listen(addr)
+		if err != nil {
+			klog.Errorf("error starting metrics server: %v", err)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
+
+		metrics.Registry.MustRegister(controller.Collector())
+		go metrics.Serve(ctx, listener)
 	}
 
 	// Start method is non-blocking and runs all registered informers in a dedicated goroutine.

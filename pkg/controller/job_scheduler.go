@@ -14,14 +14,17 @@ import (
 	"github.com/renderedtext/agent-k8s-stack/pkg/agenttypes"
 	checks "github.com/renderedtext/agent-k8s-stack/pkg/checks"
 	"github.com/renderedtext/agent-k8s-stack/pkg/config"
+	"github.com/renderedtext/agent-k8s-stack/pkg/metrics"
 	"github.com/renderedtext/agent-k8s-stack/pkg/podspec"
 	"github.com/renderedtext/agent-k8s-stack/pkg/semaphore"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	batchlisters "k8s.io/client-go/listers/batch/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 )
@@ -55,6 +58,9 @@ type JobScheduler struct {
 	current           map[string]*JobState
 	mu                sync.Mutex
 	kubernetesVersion *versions.Version
+
+	// Read only when metrics are scraped.
+	jobs batchlisters.JobLister
 }
 
 func NewJobScheduler(clientset kubernetes.Interface, config *config.Config) (*JobScheduler, error) {
@@ -81,6 +87,7 @@ func NewJobScheduler(clientset kubernetes.Interface, config *config.Config) (*Jo
 func (s *JobScheduler) RegisterInformer(informerFactory informers.SharedInformerFactory) error {
 	informer := informerFactory.Batch().V1().Jobs()
 	_, err := informer.Informer().AddEventHandler(s)
+	s.jobs = informer.Lister()
 	return err
 }
 
@@ -129,9 +136,11 @@ func (s *JobScheduler) Create(ctx context.Context, req semaphore.JobRequest, age
 		// that happened, so only give the slot back if it has not.
 		//
 		s.releaseReservation(req.JobID)
+		metrics.JobErrors.WithLabelValues(metrics.ActionCreate).Inc()
 		return err
 	}
 
+	metrics.JobsProcessed.WithLabelValues(metrics.ActionCreated).Inc()
 	klog.InfoS("Job created", "job", req.JobID, "type", req.MachineType)
 	return nil
 }
@@ -292,9 +301,19 @@ func (s *JobScheduler) delete(job *batchv1.Job) error {
 		options.Preconditions = &metav1.Preconditions{UID: &job.UID}
 	}
 
-	return s.clientset.BatchV1().
+	err := s.clientset.BatchV1().
 		Jobs(s.config.Namespace).
 		Delete(ctx, job.Name, options)
+
+	// Not found or conflict: the job is already gone or was replaced, not an API failure.
+	switch {
+	case err == nil:
+		metrics.JobsProcessed.WithLabelValues(metrics.ActionDeleted).Inc()
+	case !apierrors.IsNotFound(err) && !apierrors.IsConflict(err):
+		metrics.JobErrors.WithLabelValues(metrics.ActionDelete).Inc()
+	}
+
+	return err
 }
 
 // This method executes when a new job is added,
@@ -443,6 +462,7 @@ func (s *JobScheduler) handleInProgress(logger logr.Logger, jobID string, job *b
 		logger.Error(nil, "job did not start in time - canceling",
 			"reason", s.notStartedReason(job), "status", job.Status, "for", waitingFor)
 		s.untrack(jobID)
+		metrics.JobStartTimeouts.Inc()
 		if err := s.delete(job); err != nil {
 			logger.Error(err, "Error deleting job")
 		}
@@ -593,6 +613,40 @@ func (s *JobScheduler) Pending(unscheduled []string) int {
 	}
 
 	return len(ids)
+}
+
+// Counts splits tracked jobs into those whose agent is not ready yet and those running.
+func (s *JobScheduler) Counts() (starting, running int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, state := range s.current {
+		if state.Running {
+			running++
+		} else {
+			starting++
+		}
+	}
+
+	return starting, running
+}
+
+// Finished counts jobs that completed or failed but still exist, e.g. kept for retention.
+func (s *JobScheduler) Finished() (int, error) {
+	jobs, err := s.jobs.List(labels.Everything())
+	if err != nil {
+		return 0, err
+	}
+
+	finished := 0
+	for _, job := range jobs {
+		conditions := jobConditions(job)
+		if slices.Contains(conditions, batchv1.JobComplete) || slices.Contains(conditions, batchv1.JobFailed) {
+			finished++
+		}
+	}
+
+	return finished, nil
 }
 
 func (s *JobScheduler) IsCurrentJob(jobID string) bool {
