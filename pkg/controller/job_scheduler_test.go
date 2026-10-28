@@ -849,3 +849,102 @@ func newFakeClientset(t *testing.T, objects []runtime.Object) kubernetes.Interfa
 func randJobID() string {
 	return fmt.Sprintf("job-%d", rand.Int())
 }
+
+// With a TTL, Kubernetes deletes finished jobs: the controller frees the slot
+// but sends no DELETE. Without one, it deletes them as before.
+func Test__JobTTLAfterFinished(t *testing.T) {
+	finish := func(job *batchv1.Job, condition batchv1.JobConditionType) *batchv1.Job {
+		finished := job.DeepCopy()
+		finished.Status.Conditions = append(finished.Status.Conditions, batchv1.JobCondition{
+			Type:   condition,
+			Status: v1.ConditionTrue,
+		})
+		return finished
+	}
+
+	countDeletes := func(clientset *fake.Clientset) int {
+		n := 0
+		for _, action := range clientset.Actions() {
+			if action.Matches("delete", "jobs") {
+				n++
+			}
+		}
+		return n
+	}
+
+	for _, condition := range []batchv1.JobConditionType{batchv1.JobComplete, batchv1.JobFailed} {
+		t.Run(fmt.Sprintf("set, %s -> slot freed, no delete", condition), func(t *testing.T) {
+			scheduler, clientset := newTestScheduler(t)
+			scheduler.config.JobTTLAfterFinished = 60
+
+			jobID := randJobID()
+			req := semaphore.JobRequest{JobID: jobID, MachineType: "s1-test"}
+			require.NoError(t, scheduler.Create(context.Background(), req, &agenttypes.AgentType{AgentTypeName: "s1-test"}))
+			job := jobExists(t, scheduler, clientset, jobID)
+			require.NotNil(t, job.Spec.TTLSecondsAfterFinished)
+			require.Equal(t, int32(60), *job.Spec.TTLSecondsAfterFinished)
+
+			scheduler.OnAdd(job, false)
+			scheduler.OnUpdate(job, finish(job, condition))
+
+			require.False(t, scheduler.IsCurrentJob(jobID))
+			require.Equal(t, 0, countDeletes(clientset))
+			_ = jobExists(t, scheduler, clientset, jobID)
+
+			// Kubernetes deleting it later is just another delete event
+			scheduler.OnDelete(job)
+			require.False(t, scheduler.IsCurrentJob(jobID))
+		})
+
+		t.Run(fmt.Sprintf("unset, %s -> controller deletes", condition), func(t *testing.T) {
+			scheduler, clientset := newTestScheduler(t)
+
+			jobID := randJobID()
+			req := semaphore.JobRequest{JobID: jobID, MachineType: "s1-test"}
+			require.NoError(t, scheduler.Create(context.Background(), req, &agenttypes.AgentType{AgentTypeName: "s1-test"}))
+			job := jobExists(t, scheduler, clientset, jobID)
+			require.Nil(t, job.Spec.TTLSecondsAfterFinished)
+
+			scheduler.OnAdd(job, false)
+			scheduler.OnUpdate(job, finish(job, condition))
+
+			require.Equal(t, 1, countDeletes(clientset))
+			jobDoesNotExist(t, scheduler, clientset, jobID)
+		})
+	}
+
+	// Jobs created before the TTL was turned on carry none, so nothing else would delete them.
+	t.Run("set, job without a TTL -> controller deletes", func(t *testing.T) {
+		scheduler, clientset := newTestScheduler(t)
+
+		jobID := randJobID()
+		req := semaphore.JobRequest{JobID: jobID, MachineType: "s1-test"}
+		require.NoError(t, scheduler.Create(context.Background(), req, &agenttypes.AgentType{AgentTypeName: "s1-test"}))
+		job := jobExists(t, scheduler, clientset, jobID)
+
+		scheduler.config.JobTTLAfterFinished = 60
+		scheduler.OnAdd(job, false)
+		scheduler.OnUpdate(job, finish(job, batchv1.JobComplete))
+
+		require.Equal(t, 1, countDeletes(clientset))
+		jobDoesNotExist(t, scheduler, clientset, jobID)
+	})
+
+	// The TTL only applies to finished jobs, so a job that does not start is still ours to delete.
+	t.Run("set, start timeout -> controller deletes", func(t *testing.T) {
+		scheduler, clientset := newTestScheduler(t)
+		scheduler.config.JobTTLAfterFinished = 60
+
+		jobID := randJobID()
+		req := semaphore.JobRequest{JobID: jobID, MachineType: "s1-test"}
+		require.NoError(t, scheduler.Create(context.Background(), req, &agenttypes.AgentType{AgentTypeName: "s1-test"}))
+		job := jobExists(t, scheduler, clientset, jobID)
+
+		timedOut := job.DeepCopy()
+		timedOut.CreationTimestamp = metav1.Time{Time: time.Now().Add(-2 * time.Minute)}
+		scheduler.OnUpdate(job, timedOut)
+
+		require.Equal(t, 1, countDeletes(clientset))
+		jobDoesNotExist(t, scheduler, clientset, jobID)
+	})
+}

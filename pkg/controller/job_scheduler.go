@@ -194,6 +194,11 @@ func (s *JobScheduler) buildJob(job semaphore.JobRequest, agentType *agenttypes.
 
 	s.agentPodSpec(agentType).ApplyTo(&podSpec)
 
+	var ttl *int32
+	if s.config.JobTTLAfterFinished > 0 {
+		ttl = &s.config.JobTTLAfterFinished
+	}
+
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      s.jobName(job.JobID),
@@ -201,10 +206,11 @@ func (s *JobScheduler) buildJob(job semaphore.JobRequest, agentType *agenttypes.
 			Labels:    s.buildLabels(job),
 		},
 		Spec: batchv1.JobSpec{
-			Parallelism:           &parallelism,
-			Completions:           &parallelism,
-			BackoffLimit:          &retries,
-			ActiveDeadlineSeconds: &activeDeadlineSeconds,
+			Parallelism:             &parallelism,
+			Completions:             &parallelism,
+			BackoffLimit:            &retries,
+			ActiveDeadlineSeconds:   &activeDeadlineSeconds,
+			TTLSecondsAfterFinished: ttl,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: s.buildLabels(job)},
 				Spec:       podSpec,
@@ -496,6 +502,9 @@ func (s *JobScheduler) handleSuccessfulJob(logger logr.Logger, jobID string, job
 	// before we even check if the job should be deleted or not,
 	// to make room for new jobs.
 	s.untrack(jobID)
+	if leftToKubernetes(job) {
+		return
+	}
 
 	shouldDelete, err := s.ShouldDeleteJob(logger, s.config.KeepSuccessfulJobsFor, completedAt(job))
 	if err != nil {
@@ -519,6 +528,9 @@ func (s *JobScheduler) handleFailedJob(logger logr.Logger, jobID string, job *ba
 	// before we even check if the job should be deleted or not,
 	// to make room for new jobs.
 	s.untrack(jobID)
+	if leftToKubernetes(job) {
+		return
+	}
 
 	shouldDelete, err := s.ShouldDeleteJob(logger, s.config.KeepFailedJobsFor, job.CreationTimestamp.Time)
 	if err != nil {
@@ -533,6 +545,12 @@ func (s *JobScheduler) handleFailedJob(logger logr.Logger, jobID string, job *ba
 			return
 		}
 	}
+}
+
+// Kubernetes deletes a finished job that carries a TTL, so the controller does not.
+// Checking the job, not the config, keeps deleting jobs created before the TTL was set.
+func leftToKubernetes(job *batchv1.Job) bool {
+	return job.Spec.TTLSecondsAfterFinished != nil
 }
 
 func (s *JobScheduler) ShouldDeleteJob(l logr.Logger, keepFor time.Duration, t time.Time) (bool, error) {

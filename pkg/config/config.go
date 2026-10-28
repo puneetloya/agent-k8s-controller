@@ -39,6 +39,7 @@ type Config struct {
 	KeepFailedJobsFor      time.Duration
 	KeepSuccessfulJobsFor  time.Duration
 	JobStartTimeout        time.Duration
+	JobTTLAfterFinished    int32
 }
 
 func NewConfigFromEnv(endpoint string) (*Config, error) {
@@ -81,6 +82,11 @@ func NewConfigFromEnv(endpoint string) (*Config, error) {
 		return nil, fmt.Errorf("invalid SEMAPHORE_AGENT_POD_SPEC: %w", err)
 	}
 
+	jobTTL := jobTTLAfterFinished()
+	if jobTTL > 0 && (keepFailedJobsFor() != 0 || keepSuccessfulJobsFor() != 0) {
+		return nil, fmt.Errorf("JOB_TTL_SECONDS_AFTER_FINISHED cannot be combined with KEEP_FAILED_JOBS_FOR or KEEP_SUCCESSFUL_JOBS_FOR")
+	}
+
 	return &Config{
 		SemaphoreEndpoint:      endpoint,
 		Namespace:              k8sNamespace,
@@ -95,6 +101,7 @@ func NewConfigFromEnv(endpoint string) (*Config, error) {
 		KeepFailedJobsFor:      keepFailedJobsFor(),
 		KeepSuccessfulJobsFor:  keepSuccessfulJobsFor(),
 		JobStartTimeout:        jobStartTimeout(),
+		JobTTLAfterFinished:    jobTTL,
 	}, nil
 }
 
@@ -153,6 +160,22 @@ func keepSuccessfulJobsFor() time.Duration {
 	}
 
 	return keepFor
+}
+
+// 0, the default, keeps deleting finished jobs from the controller. Invalid values do too.
+func jobTTLAfterFinished() int32 {
+	fromEnv := os.Getenv("JOB_TTL_SECONDS_AFTER_FINISHED")
+	if fromEnv == "" {
+		return 0
+	}
+
+	v, err := strconv.ParseInt(fromEnv, 10, 32)
+	if err != nil || v < 0 {
+		klog.Warningf("Invalid JOB_TTL_SECONDS_AFTER_FINISHED (%s) - the controller deletes finished jobs", fromEnv)
+		return 0
+	}
+
+	return int32(v)
 }
 
 func jobStartTimeout() time.Duration {

@@ -28,6 +28,7 @@ A Kubernetes controller that runs Semaphore jobs in Kubernetes.
 | KEEP_FAILED_JOBS_FOR                   | A [duration string](https://pkg.go.dev/time#ParseDuration) indicating how long to keep failed Kubernetes jobs. For example, `5m`. Default is 0. |
 | KEEP_SUCCESSFUL_JOBS_FOR               | A [duration string](https://pkg.go.dev/time#ParseDuration) indicating how long to successful failed Kubernetes jobs. For example, `5m`. Default is 0. |
 | JOB_START_TIMEOUT                      | A [duration string](https://pkg.go.dev/time#ParseDuration) indicating how long to wait for a Kubernetes job created to start; after the timeout has passed, the Kubernetes job is deleted. Default is `5m`. |
+| JOB_TTL_SECONDS_AFTER_FINISHED         | Seconds after a Kubernetes job finishes, successfully or not, before Kubernetes deletes it, through the job's `ttlSecondsAfterFinished`. The controller then stops deleting finished jobs itself, which halves its write requests per job; it still deletes jobs that do not start within `JOB_START_TIMEOUT`, and jobs created without a TTL. It replaces `KEEP_FAILED_JOBS_FOR` and `KEEP_SUCCESSFUL_JOBS_FOR`: the controller does not start if either is also set, because the TTL counts from when the job finishes, and one value covers both outcomes. By default, 0, which keeps the controller deleting finished jobs. |
 
 ### Scheduling agent pods
 
