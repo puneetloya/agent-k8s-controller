@@ -29,6 +29,9 @@ type Controller struct {
 	podInformers   informers.SharedInformerFactory
 
 	queueOrder *queueOrder
+
+	// Nil unless MAX_PENDING_JOBS is set.
+	orphans *orphanCleaner
 }
 
 func New(
@@ -68,6 +71,16 @@ func New(
 	if config.MaxPendingJobs > 0 {
 		if err := c.setupPendingTracker(); err != nil {
 			return nil, err
+		}
+
+		jobs := informerFactory.Batch().V1().Jobs()
+		c.orphans = &orphanCleaner{
+			tracker:    c.pendingTracker,
+			jobs:       jobs.Lister(),
+			jobsSynced: jobs.Informer().HasSynced,
+			jobName:    jobScheduler.jobName,
+			delete:     deletePinned(c),
+			since:      map[string]time.Time{},
 		}
 	}
 
@@ -112,6 +125,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 
 	go wait.UntilWithContext(ctx, c.runWorker, time.Second)
+	if c.orphans != nil {
+		go wait.UntilWithContext(ctx, func(ctx context.Context) { c.orphans.run(ctx, time.Now()) }, 30*time.Second)
+	}
 
 	<-ctx.Done()
 	logger.Info("Shutting down workers")

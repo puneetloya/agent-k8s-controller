@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
 )
@@ -16,11 +17,19 @@ import (
 // Only used when MAX_PENDING_JOBS is set.
 type PendingTracker struct {
 	mu          sync.Mutex
-	unscheduled map[string]string
+	unscheduled map[string]waitingPod
+	synced      cache.InformerSynced
+}
+
+type waitingPod struct {
+	namespace string
+	name      string
+	uid       types.UID
+	jobID     string
 }
 
 func NewPendingTracker() *PendingTracker {
-	return &PendingTracker{unscheduled: map[string]string{}}
+	return &PendingTracker{unscheduled: map[string]waitingPod{}}
 }
 
 // JobPodSelector matches the pods agents create for jobs, not the agents' own pods,
@@ -40,7 +49,9 @@ func JobPodSelector() (string, error) {
 }
 
 func (p *PendingTracker) RegisterInformer(informerFactory informers.SharedInformerFactory) error {
-	_, err := informerFactory.Core().V1().Pods().Informer().AddEventHandler(p)
+	informer := informerFactory.Core().V1().Pods().Informer()
+	p.synced = informer.HasSynced
+	_, err := informer.AddEventHandler(p)
 	return err
 }
 
@@ -69,11 +80,29 @@ func (p *PendingTracker) JobIDs() []string {
 	defer p.mu.Unlock()
 
 	ids := make([]string, 0, len(p.unscheduled))
-	for _, id := range p.unscheduled {
-		ids = append(ids, id)
+	for _, pod := range p.unscheduled {
+		ids = append(ids, pod.jobID)
 	}
 
 	return ids
+}
+
+// Waiting returns the job pods that are waiting for a node.
+func (p *PendingTracker) Waiting() []waitingPod {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	pods := make([]waitingPod, 0, len(p.unscheduled))
+	for _, pod := range p.unscheduled {
+		pods = append(pods, pod)
+	}
+
+	return pods
+}
+
+// HasSynced tells whether the pod watch has listed the existing pods yet.
+func (p *PendingTracker) HasSynced() bool {
+	return p.synced != nil && p.synced()
 }
 
 func (p *PendingTracker) observe(obj interface{}) {
@@ -91,7 +120,7 @@ func (p *PendingTracker) observe(obj interface{}) {
 	defer p.mu.Unlock()
 
 	if isUnscheduled(pod) {
-		p.unscheduled[podKey(pod)] = jobID
+		p.unscheduled[podKey(pod)] = waitingPod{namespace: pod.Namespace, name: pod.Name, uid: pod.UID, jobID: jobID}
 		return
 	}
 

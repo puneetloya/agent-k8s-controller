@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/renderedtext/agent-k8s-stack/pkg/agenttypes"
 	"k8s.io/klog/v2"
 )
+
+// A request that hangs would stop the controller from creating any job.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 type Client struct {
 	Endpoint string
@@ -64,14 +68,19 @@ func (a *Client) listJobsForAgentType(agentType *agenttypes.AgentType) ([]string
 	}
 
 	req.Header.Add("Authorization", fmt.Sprintf("Token %s", agentType.RegistrationToken))
-	response, err := http.DefaultClient.Do(req)
+	response, err := httpClient.Do(req)
 	if err != nil {
 		return []string{}, err
 	}
 
+	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		return []string{}, err
+	}
+
+	if response.StatusCode != http.StatusOK {
+		return []string{}, fmt.Errorf("unexpected status %d", response.StatusCode)
 	}
 
 	apiResponse := Response{}

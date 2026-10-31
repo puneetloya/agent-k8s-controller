@@ -573,8 +573,8 @@ func (s *JobScheduler) OnDelete(obj interface{}) {
 	klog.InfoS("Job deleted", "job", jobID, "type", agentType)
 }
 
-// Pending counts tracked jobs that are not running yet: the agent pod is not ready,
-// or its job pod has no node yet. Each job counts once, so this never exceeds len(current).
+// Pending counts jobs that are not running yet: agent pod not ready, or a job pod
+// waiting for a node, whether or not the controller still tracks its job. Each job counts once.
 func (s *JobScheduler) Pending(unscheduled []string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -587,9 +587,7 @@ func (s *JobScheduler) Pending(unscheduled []string) int {
 	}
 
 	for _, id := range unscheduled {
-		if _, tracked := s.current[id]; tracked {
-			ids[id] = struct{}{}
-		}
+		ids[id] = struct{}{}
 	}
 
 	return len(ids)

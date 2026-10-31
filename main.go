@@ -71,6 +71,14 @@ func main() {
 	// Start method is non-blocking and runs all registered informers in a dedicated goroutine.
 	informerFactory.Start(ctx.Done())
 
+	// Polling before the jobs are listed would see no jobs running and create too many.
+	for informer, synced := range informerFactory.WaitForCacheSync(ctx.Done()) {
+		if !synced {
+			klog.Errorf("cache for %v did not sync", informer)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
+	}
+
 	if err = controller.Run(ctx); err != nil {
 		klog.Errorf("Error running controller: %v", err)
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)

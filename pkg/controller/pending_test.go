@@ -135,13 +135,13 @@ func Test__Pending(t *testing.T) {
 		require.Equal(t, 2, scheduler.Pending([]string{"starting", "running-unscheduled"}))
 	})
 
-	t.Run("unscheduled pods of untracked jobs are ignored", func(t *testing.T) {
-		require.Equal(t, 1, scheduler.Pending([]string{"orphan-1", "orphan-2"}))
+	// They still wait for a node, and will take one.
+	t.Run("unscheduled pods of untracked jobs count too", func(t *testing.T) {
+		require.Equal(t, 3, scheduler.Pending([]string{"orphan-1", "orphan-2"}))
 	})
 
-	t.Run("never exceeds the number of tracked jobs", func(t *testing.T) {
-		all := []string{"starting", "running", "running-unscheduled", "orphan"}
-		require.LessOrEqual(t, scheduler.Pending(all), len(scheduler.current))
+	t.Run("a pod counted twice counts once", func(t *testing.T) {
+		require.Equal(t, 2, scheduler.Pending([]string{"orphan-1", "orphan-1"}))
 	})
 
 	t.Run("does not change tracked jobs", func(t *testing.T) {
