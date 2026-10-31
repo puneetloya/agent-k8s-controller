@@ -27,6 +27,8 @@ type Controller struct {
 	// Both nil unless MAX_PENDING_JOBS is set.
 	pendingTracker *PendingTracker
 	podInformers   informers.SharedInformerFactory
+
+	queueOrder *queueOrder
 }
 
 func New(
@@ -60,6 +62,7 @@ func New(
 		agentTypeRegistry: agentTypeRegistry,
 		jobScheduler:      jobScheduler,
 		config:            config,
+		queueOrder:        newQueueOrder(),
 	}
 
 	if config.MaxPendingJobs > 0 {
@@ -147,7 +150,7 @@ func (c *Controller) tick(ctx context.Context) bool {
 	}
 
 	klog.Infof("Found %d jobs in the queue", len(jobs))
-	c.createJobs(ctx, jobs, budget)
+	c.createJobs(ctx, c.queueOrder.sort(jobs, time.Now()), budget)
 	return true
 }
 

@@ -86,4 +86,6 @@ stringData:
 
 An agent pod that cannot be scheduled stays pending until `JOB_START_TIMEOUT`, when the controller logs why it did not start, deletes it, and creates it again on a later poll. While pending, it holds one of the `MAX_PARALLEL_JOBS` slots, which all agent types share, and the controller stops polling for jobs of any agent type while every slot is taken.
 
+When there is room for fewer jobs than are queued, the controller creates the ones it has been seeing in the queue the longest first, across all agent types. Semaphore lists each agent type's queue newest first, up to 500 jobs, so without this the newest jobs would always take the room and older ones could wait indefinitely.
+
 Avoid a toleration without a `key`: it tolerates every taint, including the ones Kubernetes uses to evict pods from failed nodes, so an agent pod on a failed node keeps its slot until its one-day deadline.
