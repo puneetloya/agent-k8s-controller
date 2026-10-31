@@ -1,0 +1,10 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages: ["RequestReceived"]
+rules:
+  - level: Metadata
+    users:
+      - "system:serviceaccount:semaphore:agent-k8s-controller"
+      - "system:serviceaccount:sim-west:agent-k8s-controller"
+      - "system:serviceaccount:sim-east:agent-k8s-controller"
+  - level: None
