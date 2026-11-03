@@ -573,15 +573,15 @@ func (s *JobScheduler) OnDelete(obj interface{}) {
 	klog.InfoS("Job deleted", "job", jobID, "type", agentType)
 }
 
-// Pending counts jobs that are not running yet: agent pod not ready, or a job pod
-// waiting for a node, whether or not the controller still tracks its job. Each job counts once.
-func (s *JobScheduler) Pending(unscheduled []string) int {
+// Pending counts tracked jobs whose agent pod has no node yet, plus every job pod
+// without a node. Job readiness lags pod placement under load, so pods decide.
+func (s *JobScheduler) Pending(unscheduled []string, placed map[string]struct{}) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	ids := map[string]struct{}{}
 	for id, state := range s.current {
-		if !state.Running {
+		if _, ok := placed[id]; !ok && !state.Running {
 			ids[id] = struct{}{}
 		}
 	}

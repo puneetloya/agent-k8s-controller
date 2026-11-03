@@ -13,11 +13,12 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// PendingTracker records job pods that exist but have no node yet, by job ID.
+// PendingTracker records job pods that have no node yet, and agent pods that have one.
 // Only used when MAX_PENDING_JOBS is set.
 type PendingTracker struct {
 	mu          sync.Mutex
 	unscheduled map[string]waitingPod
+	placed      map[string]string
 	synced      cache.InformerSynced
 }
 
@@ -29,23 +30,17 @@ type waitingPod struct {
 }
 
 func NewPendingTracker() *PendingTracker {
-	return &PendingTracker{unscheduled: map[string]waitingPod{}}
+	return &PendingTracker{unscheduled: map[string]waitingPod{}, placed: map[string]string{}}
 }
 
-// JobPodSelector matches the pods agents create for jobs, not the agents' own pods,
-// which carry the resource type label.
-func JobPodSelector() (string, error) {
+// PodSelector matches agent pods and the job pods agents create: both carry the job ID.
+func PodSelector() (string, error) {
 	hasJobID, err := labels.NewRequirement(config.JobIDLabel, selection.Exists, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to build job ID requirement: %w", err)
 	}
 
-	noResourceType, err := labels.NewRequirement(config.ResourceTypeLabel, selection.DoesNotExist, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to build resource type requirement: %w", err)
-	}
-
-	return labels.NewSelector().Add(*hasJobID, *noResourceType).String(), nil
+	return labels.NewSelector().Add(*hasJobID).String(), nil
 }
 
 func (p *PendingTracker) RegisterInformer(informerFactory informers.SharedInformerFactory) error {
@@ -72,6 +67,7 @@ func (p *PendingTracker) OnDelete(obj interface{}) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.unscheduled, podKey(pod))
+	delete(p.placed, podKey(pod))
 }
 
 // JobIDs returns the job IDs of job pods that are waiting for a node.
@@ -82,6 +78,19 @@ func (p *PendingTracker) JobIDs() []string {
 	ids := make([]string, 0, len(p.unscheduled))
 	for _, pod := range p.unscheduled {
 		ids = append(ids, pod.jobID)
+	}
+
+	return ids
+}
+
+// PlacedJobIDs returns the job IDs whose agent pod has a node.
+func (p *PendingTracker) PlacedJobIDs() map[string]struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	ids := make(map[string]struct{}, len(p.placed))
+	for _, id := range p.placed {
+		ids[id] = struct{}{}
 	}
 
 	return ids
@@ -118,6 +127,16 @@ func (p *PendingTracker) observe(obj interface{}) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Agent pods carry the resource type label; job pods do not.
+	if _, agent := pod.Labels[config.ResourceTypeLabel]; agent {
+		if pod.Spec.NodeName != "" {
+			p.placed[podKey(pod)] = jobID
+		} else {
+			delete(p.placed, podKey(pod))
+		}
+		return
+	}
 
 	if isUnscheduled(pod) {
 		p.unscheduled[podKey(pod)] = waitingPod{namespace: pod.Namespace, name: pod.Name, uid: pod.UID, jobID: jobID}
