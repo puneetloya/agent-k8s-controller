@@ -86,25 +86,54 @@ func Test__PendingTracker(t *testing.T) {
 	})
 }
 
-func Test__JobPodSelector(t *testing.T) {
-	raw, err := JobPodSelector()
+func Test__PodSelector(t *testing.T) {
+	raw, err := PodSelector()
 	require.NoError(t, err)
 	selector, err := labels.Parse(raw)
 	require.NoError(t, err)
 
-	jobPodLabels := labels.Set{config.JobIDLabel: "a", config.AgentTypeLabel: "s1-test"}
-	require.True(t, selector.Matches(jobPodLabels))
-
-	// The controller's own agent pods carry the resource type label.
-	agentPodLabels := labels.Set{
+	require.True(t, selector.Matches(labels.Set{config.JobIDLabel: "a", config.AgentTypeLabel: "s1-test"}))
+	require.True(t, selector.Matches(labels.Set{
 		config.JobIDLabel:        "a",
 		config.AgentTypeLabel:    "s1-test",
 		config.ResourceTypeLabel: config.SemaphoreJobResourceType,
-	}
-	require.False(t, selector.Matches(agentPodLabels))
+	}))
 
-	// Job pods created before the label existed are not matched.
+	// Pods created before the label existed are not matched.
 	require.False(t, selector.Matches(labels.Set{config.AgentTypeLabel: "s1-test"}))
+}
+
+func agentPod(name, jobID, node string) *corev1.Pod {
+	pod := jobPod(name, jobID, node)
+	pod.Labels[config.ResourceTypeLabel] = config.SemaphoreJobResourceType
+	return pod
+}
+
+func Test__PendingTracker_AgentPods(t *testing.T) {
+	t.Run("agent pod is placed once it has a node", func(t *testing.T) {
+		p := NewPendingTracker()
+		pod := agentPod("agent-a", "a", "")
+		p.OnAdd(pod, false)
+		require.Empty(t, p.PlacedJobIDs())
+		require.Empty(t, p.JobIDs(), "agent pods are not job pods")
+
+		scheduled := pod.DeepCopy()
+		scheduled.Spec.NodeName = "node-1"
+		p.OnUpdate(pod, scheduled)
+		require.Equal(t, map[string]struct{}{"a": {}}, p.PlacedJobIDs())
+		require.Empty(t, p.Waiting())
+
+		p.OnDelete(scheduled)
+		require.Empty(t, p.PlacedJobIDs())
+	})
+
+	t.Run("deleted agent pod arriving as a tombstone is removed", func(t *testing.T) {
+		p := NewPendingTracker()
+		pod := agentPod("agent-a", "a", "node-1")
+		p.OnAdd(pod, false)
+		p.OnDelete(cache.DeletedFinalStateUnknown{Key: "default/agent-a", Obj: pod})
+		require.Empty(t, p.PlacedJobIDs())
+	})
 }
 
 func newPendingTestScheduler(t *testing.T, maxParallel, maxPending int) *JobScheduler {
@@ -128,25 +157,35 @@ func Test__Pending(t *testing.T) {
 	scheduler.track("running-unscheduled", "s1-test", true)
 
 	t.Run("counts starting jobs and running jobs whose pod has no node", func(t *testing.T) {
-		require.Equal(t, 2, scheduler.Pending([]string{"running-unscheduled"}))
+		require.Equal(t, 2, scheduler.Pending([]string{"running-unscheduled"}, nil))
 	})
 
 	t.Run("a job that is both starting and unscheduled counts once", func(t *testing.T) {
-		require.Equal(t, 2, scheduler.Pending([]string{"starting", "running-unscheduled"}))
+		require.Equal(t, 2, scheduler.Pending([]string{"starting", "running-unscheduled"}, nil))
 	})
 
 	// They still wait for a node, and will take one.
 	t.Run("unscheduled pods of untracked jobs count too", func(t *testing.T) {
-		require.Equal(t, 3, scheduler.Pending([]string{"orphan-1", "orphan-2"}))
+		require.Equal(t, 3, scheduler.Pending([]string{"orphan-1", "orphan-2"}, nil))
 	})
 
 	t.Run("a pod counted twice counts once", func(t *testing.T) {
-		require.Equal(t, 2, scheduler.Pending([]string{"orphan-1", "orphan-1"}))
+		require.Equal(t, 2, scheduler.Pending([]string{"orphan-1", "orphan-1"}, nil))
+	})
+
+	// The Job's ready count can lag minutes behind its pod getting a node.
+	t.Run("a starting job whose agent pod has a node does not count", func(t *testing.T) {
+		require.Equal(t, 0, scheduler.Pending(nil, map[string]struct{}{"starting": {}}))
+	})
+
+	t.Run("a job pod without a node still counts once its agent is placed", func(t *testing.T) {
+		placed := map[string]struct{}{"starting": {}, "running-unscheduled": {}}
+		require.Equal(t, 1, scheduler.Pending([]string{"running-unscheduled"}, placed))
 	})
 
 	t.Run("does not change tracked jobs", func(t *testing.T) {
 		before := len(scheduler.current)
-		_ = scheduler.Pending([]string{"orphan"})
+		_ = scheduler.Pending([]string{"orphan"}, nil)
 		require.Equal(t, before, len(scheduler.current))
 		require.False(t, scheduler.IsCurrentJob("orphan"))
 	})

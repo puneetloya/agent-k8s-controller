@@ -88,9 +88,9 @@ func New(
 }
 
 // Job pods lack the resource type label the shared informer factory filters on,
-// so they get their own factory, scoped to job pods only.
+// so pods get their own factory, scoped to pods that carry a job ID.
 func (c *Controller) setupPendingTracker() error {
-	selector, err := JobPodSelector()
+	selector, err := PodSelector()
 	if err != nil {
 		return err
 	}
@@ -180,7 +180,7 @@ func (c *Controller) pendingBudget() (int, bool) {
 	}
 
 	limit := c.config.MaxPendingJobs
-	pending := c.jobScheduler.Pending(c.pendingTracker.JobIDs())
+	pending := c.jobScheduler.Pending(c.pendingTracker.JobIDs(), c.pendingTracker.PlacedJobIDs())
 	if pending >= limit {
 		klog.InfoS("Not polling Semaphore API - too many pending jobs", "pending", pending, "max", limit)
 		return 0, false
